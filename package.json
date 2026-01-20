@@ -1,8 +1,8 @@
 {
-  "name": "hello-cdk",
+  "name": "home-energy-coach",
   "version": "0.1.0",
   "bin": {
-    "hello-cdk": "bin/hello-cdk.js"
+    "home-energy-coach": "bin/home-energy-coach.js"
   },
   "scripts": {
     "build": "tsc",
