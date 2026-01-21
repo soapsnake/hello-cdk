@@ -22,11 +22,15 @@ function checkRequiredContext(app: cdk.App, key: string): void {
   }
 }
 
-// Prefer environment variables, then existing context, then sensible defaults for local dev
-const deployment = process.env.DEPLOYMENT || app.node.tryGetContext('deployment') || 'dev';
-const environment = process.env.ENVIRONMENT || app.node.tryGetContext('environment') || 'dev';
-const adminEmailAddress = process.env.ADMIN_EMAIL || app.node.tryGetContext('adminEmailAddress') || 'admin@example.com';
-const identityCenterInstanceArn = process.env.IDENTITY_CENTER_INSTANCE_ARN || app.node.tryGetContext('identityCenterInstanceArn') || '';
+// Prefer environment variables, then existing context (treat empty string as set but invalid)
+const deployment = process.env.DEPLOYMENT !== undefined ? process.env.DEPLOYMENT : (app.node.tryGetContext('deployment') || 'dev');
+const environment = process.env.ENVIRONMENT !== undefined ? process.env.ENVIRONMENT : (app.node.tryGetContext('environment') || 'dev');
+const adminEmailAddress = process.env.ADMIN_EMAIL !== undefined
+  ? process.env.ADMIN_EMAIL
+  : (app.node.tryGetContext('adminEmailAddress') ?? '');
+const identityCenterInstanceArn = process.env.IDENTITY_CENTER_INSTANCE_ARN !== undefined
+  ? process.env.IDENTITY_CENTER_INSTANCE_ARN
+  : (app.node.tryGetContext('identityCenterInstanceArn') ?? '');
 
 // Ensure app context contains the resolved values so stacks using app.node.tryGetContext(...) will see them
 app.node.setContext('deployment', deployment);
@@ -34,10 +38,19 @@ app.node.setContext('environment', environment);
 app.node.setContext('adminEmailAddress', adminEmailAddress);
 app.node.setContext('identityCenterInstanceArn', identityCenterInstanceArn);
 
-// Validate required keys
-checkRequiredContext(app, 'environment');
-checkRequiredContext(app, 'identityCenterInstanceArn');
-checkRequiredContext(app, 'adminEmailAddress');
+// Validate required keys and ensure non-empty (empty string is invalid)
+if (!environment) {
+  console.error('`environment` is required and cannot be empty. Provide via ENVIRONMENT or -c environment=value');
+  process.exit(1);
+}
+if (!identityCenterInstanceArn) {
+  console.error('`identityCenterInstanceArn` is required and cannot be empty. Provide via IDENTITY_CENTER_INSTANCE_ARN or -c identityCenterInstanceArn=value');
+  process.exit(1);
+}
+if (!adminEmailAddress) {
+  console.error('`adminEmailAddress` is required and cannot be empty. Provide via ADMIN_EMAIL or -c adminEmailAddress=value');
+  process.exit(1);
+}
 
 const defaultStackProps: cdk.StackProps = {
   env: appEnv,
