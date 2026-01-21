@@ -3,103 +3,139 @@ import { aws_s3 as s3 } from "aws-cdk-lib";
 import { aws_lambda as lambda } from "aws-cdk-lib";
 import { aws_s3_notifications as s3n } from "aws-cdk-lib";
 import { aws_sns as sns } from "aws-cdk-lib";
+import { aws_sns_subscriptions as snsSubscriptions } from "aws-cdk-lib";
 import * as path from "path";
+import { SharedResourcesStack } from "../stack-shared-resources/stack-shared-resources";
 
 export interface DataPipelineStackProps extends cdk.StackProps {
-  readonly rawDataLandingBucket: s3.Bucket;
-  readonly snsTopicRawUpload: sns.Topic;
-  readonly snsTopicCalculatorSummary: sns.Topic;
+
+  readonly calculatedEnergyTable: cdk.aws_dynamodb.Table;
+
+  readonly adminEmailAddress: string;
+
+  readonly sharedResourcesStack: SharedResourcesStack;
 }
 
 /**
  * The stack class extends the base CDK Stack
  */
 export class DataPipelineStack extends cdk.Stack {
-  /**
-   * Constructor for the stack
-   * @param {cdk.App} scope - The CDK application scope
-   * @param {string} id - Stack ID
-   * @param {DataPipelineStackProps} props - Data pipeline stack properties
-   */
+  
+  public readonly rawDataBucket: s3.Bucket;
+
+  public readonly jsonTransformedBucket: s3.Bucket;
+
+  public readonly snsTopicRawUpload: sns.Topic;
+
+  public readonly snsTopicCalculatorSummary: sns.Topic;
+
+  public readonly transformToJsonLambdaFunction: lambda.Function;
+
+  public readonly calculateAndNotifyLambdaFunction: lambda.Function;
+
+  public readonly processedDataBucket: s3.Bucket;
+
   constructor(scope: cdk.App, id: string, props: DataPipelineStackProps) {
-    // Call super constructor
     super(scope, id, props);
 
-    // Create S3 bucket to store transformed JSON
-    const jsonTransformedBucket = new s3.Bucket(this, "JsonTransformedBucket", {
-      versioned: true,
+    this.rawDataBucket = new s3.Bucket(this, "RawDataBucket", {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
     });
 
-    // Create Lambda function to transform CSV to JSON
-    const transformToJsonLambdaFunction = new lambda.Function(
-      this,
-      "TransformToJsonLambdaFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_20_X,
-        handler: "index.main",
-        code: lambda.Code.fromAsset(
-          path.join(__dirname, "./lambda/lambda-transform-to-json")
-        ),
-        environment: {
-          TRANSFORMED_BUCKET: jsonTransformedBucket.bucketName,
-          AWS_REGION: cdk.Stack.of(this).region,
-        },
-        description:
-          "Lambda function transforms CSV to JSON and saves to S3 bucket",
-      }
-    );
-
-    // Create Lambda function to calculate energy usage and notify
-    const calculateAndNotifyLambdaFunction = new lambda.Function(
-      this,
-      "CalculateAndNotifyLambdaFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_18_X,
-        handler: "index.main",
-        code: lambda.Code.fromAsset(
-          path.join(__dirname, "./lambda/lambda-calculate-notify")
-        ),
-        environment: {
-          SNS_TOPIC_CALCULATOR_SUMMARY: props.snsTopicCalculatorSummary.topicArn,
-          AWS_REGION: cdk.Stack.of(this).region,
-        },
-        description:
-          `
-          Lambda function calculates
-          total energy usage and sends
-          a summary notification via SNS
-          `,
-      }
-    );
-
-    // Grant permissions for Lambda functions
-    props.rawDataLandingBucket.grantRead(transformToJsonLambdaFunction);
-    jsonTransformedBucket.grantWrite(transformToJsonLambdaFunction);
-    jsonTransformedBucket.grantRead(calculateAndNotifyLambdaFunction);
-
-    // Add event notification to trigger CSV transformation on .csv files
-    props.rawDataLandingBucket.addEventNotification(
-      s3.EventType.OBJECT_CREATED,
-      new s3n.SnsDestination(props.snsTopicRawUpload),
-      { suffix: ".csv" }
-    );
-
-    // Add event notification to trigger calculation on .json files
-    props.rawDataLandingBucket.addEventNotification(
-      s3.EventType.OBJECT_CREATED,
-      new s3n.LambdaDestination(calculateAndNotifyLambdaFunction),
-      { suffix: ".json" }
-    );
-
-    // Output S3 bucket names for reference
-    new cdk.CfnOutput(this, "RawDataLandingBucketName", {
-      value: props.rawDataLandingBucket.bucketName,
+    this.jsonTransformedBucket = new s3.Bucket(this, "JsonTransformedBucket", {
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      versioned: true,
     });
 
+    this.snsTopicRawUpload = new sns.Topic(this, "SnsTopicRawUpload", {
+      displayName: "Home energy coach raw data upload notifications",
+    });
+
+    this.snsTopicRawUpload.addSubscription(
+      new snsSubscriptions.EmailSubscription(props.adminEmailAddress)
+    );
+
+    this.snsTopicCalculatorSummary = new sns.Topic(this, "SnsTopicCalculatorSummary", {
+      displayName: "Home energy coach calculation summary notifications",
+    });
+
+    this.snsTopicCalculatorSummary.addSubscription(
+      new snsSubscriptions.EmailSubscription(props.adminEmailAddress)
+    );
+
+    this.transformToJsonLambdaFunction = new lambda.Function(this, "TransformToJsonFunction", {
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: "index.main",
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, "./lambda/lambda-transform-to-json")
+      ),
+      environment: {
+        TRANSFORMED_JSON_BUCKET: this.jsonTransformedBucket.bucketName,
+        NODE_OPTIONS: "--enable-source-maps",
+      },
+      description: "lambda function that transforms raw energy data files to JSON format and save to S3",
+    });
+
+    this.calculateAndNotifyLambdaFunction = new lambda.Function(this, "CalculateAndNotifyFunction", {
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: "index.main",
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, "./lambda/lambda-calculate-notify")
+      ),
+      environment: {
+        SNS_TOPIC_CALCULATOR_SUMMARY: this.snsTopicCalculatorSummary.topicArn,
+        CALCULATED_ENERGY_TABLE: props.calculatedEnergyTable.tableName,
+        NODE_OPTIONS : "--enable-source-maps",
+      },
+      description: "lambda function that calculates energy usage from JSON data and notifies users via SNS",
+    });
+
+    this.rawDataBucket.grantRead(this.transformToJsonLambdaFunction);
+    this.jsonTransformedBucket.grantWrite(this.transformToJsonLambdaFunction);
+    this.jsonTransformedBucket.grantRead(this.calculateAndNotifyLambdaFunction);
+    props.calculatedEnergyTable.grantWriteData(this.calculateAndNotifyLambdaFunction);
+
+    this.rawDataBucket.addEventNotification(
+      s3.EventType.OBJECT_CREATED,
+      new s3n.LambdaDestination(this.transformToJsonLambdaFunction),
+      {suffix: '.csv'}
+    );
+
+    this.rawDataBucket.addEventNotification(
+      s3.EventType.OBJECT_CREATED,
+      new s3n.SnsDestination(this.snsTopicRawUpload),
+      {suffix: '.csv.notify'}
+    );
+
+    this.jsonTransformedBucket.addEventNotification(
+      s3.EventType.OBJECT_CREATED,
+      new s3n.LambdaDestination(this.calculateAndNotifyLambdaFunction),
+      {suffix: '.json'}
+    );
+
+    this.processedDataBucket = new s3.Bucket(this, "ProcessedDataBucket", {
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      versioned: true,
+    });
+
+    new cdk.CfnOutput(this, "RawDataBucketName", {
+      value: this.rawDataBucket.bucketName,
+      description: "The name of the S3 bucket for raw data csv uploads",
+    });
     new cdk.CfnOutput(this, "JsonTransformedBucketName", {
-      value: jsonTransformedBucket.bucketName,
+      value: this.jsonTransformedBucket.bucketName,
+      description: "The name of the S3 bucket for transformed JSON data",
     });
-
+    new cdk.CfnOutput(this, "SnsTopicRawUploadArn", {
+      value: this.snsTopicRawUpload.topicArn,
+      description: "The ARN of the SNS topic for raw data upload notifications",
+    });
+    new cdk.CfnOutput(this, "SnsTopicCalculatorSummaryArn", { 
+      value: this.snsTopicCalculatorSummary.topicArn,
+      description: "The ARN of the SNS topic for calculation summary notifications",
+    });
+    }
   }
-}

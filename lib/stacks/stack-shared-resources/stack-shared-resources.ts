@@ -2,48 +2,50 @@ import * as cdk from 'aws-cdk-lib';
 import { aws_s3 as  s3 } from 'aws-cdk-lib';
 import { aws_sns as sns } from 'aws-cdk-lib';
 import { aws_sns_subscriptions as subscriptions } from 'aws-cdk-lib';
-
+import { aws_dynamodb } from 'aws-cdk-lib';
 
 export interface StackSharedResourcesProps extends cdk.StackProps {
-  // Define any additional properties if needed
-  readonly adminEmailAddress: string;
+
+  readonly stage?: string;
 }
 
 export class SharedResourcesStack extends cdk.Stack {
-  public readonly rawDataUploadS3Bucket: s3.Bucket;
-  public readonly snsRawDataUploadTopic: sns.Topic;
-  public readonly snsCalculatorSummaryTopic: sns.Topic;
+
+  public readonly calculatedEnergyTable: aws_dynamodb.Table;
 
   constructor(scope: cdk.App, id: string, props?: StackSharedResourcesProps) {
     super(scope, id, props);
 
-    // Create a shared S3 bucket
-    this.rawDataUploadS3Bucket = new s3.Bucket(this, 'rawDataUploadS3Bucket', {
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: true,
-      lifecycleRules: [
-        {
-          expiration: cdk.Duration.days(1),
-        },
-      ],
+    const stage = props?.stage ?? "dev";
+
+    this.calculatedEnergyTable = new aws_dynamodb.Table(
+      this, 
+      'CalculatedEnergyTable', 
+      {
+        partitionKey: { name: 'customerId', type: aws_dynamodb.AttributeType.STRING },
+        sortKey: { name: 'timestamp', type: aws_dynamodb.AttributeType.STRING },
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        billingMode: aws_dynamodb.BillingMode.PAY_PER_REQUEST,  
+        timeToLiveAttribute: 'ttl',
+        pointInTimeRecovery: true,
+      }
+  );
+
+    this.calculatedEnergyTable.addGlobalSecondaryIndex({
+      indexName: 'CustomerLocationIndex',
+      partitionKey: { name: 'customerId', type: aws_dynamodb.AttributeType.STRING },
+      sortKey: { name: 'locationId', type: aws_dynamodb.AttributeType.STRING },
+      projectionType: aws_dynamodb.ProjectionType.ALL,
     });
 
-    // Create a shared SNS topic
-    this.snsRawDataUploadTopic = new sns.Topic(this, 'snsRawDataUploadTopic', {
-      displayName: 'home energy coach raw data upload topic',
+    new cdk.CfnOutput(this, 'CalculatedEnergyTableName', {
+      value: this.calculatedEnergyTable.tableName,
+      description: 'The name of the DynamoDB table for calculated energy usage',
     });
-    
-    this.snsRawDataUploadTopic.addSubscription(
-      new subscriptions.EmailSubscription(props?.adminEmailAddress || '')
-    );
-
-    // Create calculator SNS topic
-    this.snsCalculatorSummaryTopic = new sns.Topic(this, 'snsCalculatorSummaryTopic', {
-      displayName: 'home energy coach calculator topic',
-    });
-
-    this.snsCalculatorSummaryTopic.addSubscription(
-      new subscriptions.EmailSubscription(props?.adminEmailAddress || '')
-    );  
   }
+
+
+
+
+
 }
