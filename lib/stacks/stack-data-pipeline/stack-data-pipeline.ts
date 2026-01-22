@@ -1,6 +1,7 @@
 import * as cdk from "aws-cdk-lib";
 import { aws_s3 as s3 } from "aws-cdk-lib";
 import { aws_lambda as lambda } from "aws-cdk-lib";
+import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { aws_s3_notifications as s3n } from "aws-cdk-lib";
 import { aws_sns as sns } from "aws-cdk-lib";
 import { aws_sns_subscriptions as snsSubscriptions } from "aws-cdk-lib";
@@ -65,37 +66,45 @@ export class DataPipelineStack extends cdk.Stack {
       new snsSubscriptions.EmailSubscription(props.adminEmailAddress)
     );
 
-    this.transformToJsonLambdaFunction = new lambda.Function(this, "TransformToJsonFunction", {
+    this.transformToJsonLambdaFunction = new NodejsFunction(this, 'TransformToJsonFunction', {
       runtime: lambda.Runtime.NODEJS_20_X,
-      handler: "index.main",
-      code: lambda.Code.fromAsset(
-        path.join(__dirname, "./lambda/lambda-transform-to-json")
-      ),
+      entry: path.join(__dirname, './lambda/lambda-transform-to-json/index.ts'),
+      handler: 'main',
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 1024,
       environment: {
         TRANSFORMED_JSON_BUCKET: this.jsonTransformedBucket.bucketName,
-        NODE_OPTIONS: "--enable-source-maps",
+        NODE_OPTIONS: '--enable-source-maps',
       },
-      description: "lambda function that transforms raw energy data files to JSON format and save to S3",
+      bundling: {
+        sourceMap: true,
+      },
+      description: 'lambda function that transforms raw energy data files to JSON format and save to S3',
     });
 
-    this.calculateAndNotifyLambdaFunction = new lambda.Function(this, "CalculateAndNotifyFunction", {
+    this.calculateAndNotifyLambdaFunction = new NodejsFunction(this, 'CalculateAndNotifyFunction', {
       runtime: lambda.Runtime.NODEJS_20_X,
-      handler: "index.main",
-      code: lambda.Code.fromAsset(
-        path.join(__dirname, "./lambda/lambda-calculate-notify")
-      ),
+      entry: path.join(__dirname, './lambda/lambda-calculate-notify/index.ts'),
+      handler: 'main',
       environment: {
         SNS_TOPIC_CALCULATOR_SUMMARY: this.snsTopicCalculatorSummary.topicArn,
+        CALCULATED_ENERGY_TABLE_NAME: props.calculatedEnergyTable.tableName,
         CALCULATED_ENERGY_TABLE: props.calculatedEnergyTable.tableName,
-        NODE_OPTIONS : "--enable-source-maps",
+        NODE_OPTIONS: '--enable-source-maps',
       },
-      description: "lambda function that calculates energy usage from JSON data and notifies users via SNS",
+      bundling: {
+        sourceMap: true,
+      },
+      description: 'lambda function that calculates energy usage from JSON data and notifies users via SNS',
     });
 
     this.rawDataBucket.grantRead(this.transformToJsonLambdaFunction);
     this.jsonTransformedBucket.grantWrite(this.transformToJsonLambdaFunction);
     this.jsonTransformedBucket.grantRead(this.calculateAndNotifyLambdaFunction);
-    props.calculatedEnergyTable.grantWriteData(this.calculateAndNotifyLambdaFunction);
+    props.calculatedEnergyTable.grantReadWriteData(this.calculateAndNotifyLambdaFunction);
+    
+    // Grant SNS publish permission to calculateAndNotifyLambdaFunction
+    this.snsTopicCalculatorSummary.grantPublish(this.calculateAndNotifyLambdaFunction);
 
     this.rawDataBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,

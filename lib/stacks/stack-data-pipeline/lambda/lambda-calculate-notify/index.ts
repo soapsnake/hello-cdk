@@ -35,11 +35,27 @@ interface EnergyUsageRecord {
     heatPump: boolean;
 }
 
-export const main = async (event: S3Event): Promise<void> => {
-    try {   
+export const main = async (event: S3Event | any): Promise<void> => {
+    try {
 
-        const bucket = event.Records[0].s3.bucket.name;
-        const key = decodeURIComponent(event.Records[0].s3.object.key.replace(/\+/g, ' '));
+        // Defensive checks for event shape
+        if (!event || !event.Records || !Array.isArray(event.Records) || event.Records.length === 0) {
+            console.error('CalculateAndNotifyFunction received invalid event:', JSON.stringify(event));
+            throw new Error('Invalid S3 event: missing Records');
+        }
+
+        console.warn('CalculateAndNotifyFunction triggered with event:', JSON.stringify(event, null, 2));
+
+        // Extract bucket and key from event
+
+        const record = event.Records[0];
+        const bucket = record?.s3?.bucket?.name;
+        const keyRaw = record?.s3?.object?.key;
+        if (!bucket || !keyRaw) {
+            console.error('S3 record is missing bucket or object key:', JSON.stringify(record));
+            throw new Error('Invalid S3 record: missing bucket or key');
+        }
+        const key = decodeURIComponent(keyRaw.replace(/\+/g, ' '));
 
         //get the json from s3
         const response = await s3Client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
@@ -69,43 +85,69 @@ export const main = async (event: S3Event): Promise<void> => {
             postalCode: firstReading.postalCode,
         };
 
-        const primaryKey = `${customerInfo.customerId}#${locationInfo.locationId}#${monthYear}`;
+        // Use table key schema: partitionKey = customerId, sortKey = timestamp
+        const itemTimestampKey = monthYear; // store month-year as the sort key
 
         let shouldUpdate = true;
+        const tableName = process.env.CALCULATED_ENERGY_TABLE_NAME || process.env.CALCULATED_ENERGY_TABLE;
+        if (!tableName) throw new Error('Missing calculated energy table name in environment');
+
         const existingItem = await dynamoClient.send(new GetItemCommand({
-            TableName: process.env.CALCULATED_ENERGY_TABLE_NAME!,
+            TableName: tableName,
             Key: {
-                "PrimaryKey": { S: primaryKey },
+                customerId: { S: customerInfo.customerId },
+                timestamp: { S: itemTimestampKey },
             },
         }));
 
         const summary = calculateSummary(data);
 
         if(existingItem.Item) {
-            const existingSummary = JSON.parse(existingItem.Item.Summary.S!);
-            shouldUpdate = !realEqual(existingSummary, summary)
+            const existingSummary = existingItem.Item.summary?.S ? JSON.parse(existingItem.Item.summary.S) : null;
+            shouldUpdate = !existingSummary || !realEqual(existingSummary, summary);
         }
 
         if(shouldUpdate) {
+            const toAttr = (v: any) => {
+                if (v === undefined || v === null) return undefined;
+                const t = typeof v;
+                if (t === 'string') return { S: v };
+                if (t === 'number') return { N: String(v) };
+                if (t === 'boolean') return { BOOL: v };
+                // fallback: stringify objects/arrays
+                return { S: JSON.stringify(v) };
+            };
+
+            const item: Record<string, any> = {};
+            const nowIso = new Date().toISOString();
+            const fields: Record<string, any> = {
+                customerId: customerInfo.customerId,
+                timestamp: itemTimestampKey,
+                computedAt: nowIso,
+                customerName: customerInfo.customerName,
+                locationId: locationInfo.locationId,
+                address: locationInfo.address,
+                city: locationInfo.city,
+                state: locationInfo.state,
+                postalCode: locationInfo.postalCode,
+                summary: JSON.stringify(summary),
+                rawData: jsonData,
+            };
+            for (const [k, v] of Object.entries(fields)) {
+                const av = toAttr(v);
+                if (av !== undefined) item[k] = av;
+            }
+
             await dynamoClient.send(new PutItemCommand({
                 TableName: process.env.CALCULATED_ENERGY_TABLE_NAME!,
-                Item: { 
-                    primaryKey: { S: primaryKey },
-                    timestamp: { S: new Date().toISOString() },
-                    CustomerId: { S: customerInfo.customerId },
-                    CustomerName: { S: customerInfo.customerName },
-                    locationId: { S: locationInfo.locationId },
-                    address: { S: locationInfo.address },
-                    city: { S: locationInfo.city },
-                    state: { S: locationInfo.state },
-                    postalCode: { S: locationInfo.postalCode },
-                    summary: { S: JSON.stringify(summary) },
-                    rawData: { S: jsonData },
-                }
-            }));    
+                Item: item,
+            }));
+
+            const topicArn = process.env.SNS_TOPIC_CALCULATOR_SUMMARY || process.env.SNS_TOPIC_CALCULATOR_SUM;
+            if (!topicArn) throw new Error('Missing SNS topic ARN in environment');
 
             await snsClient.send(new PublishCommand({
-            TopicArn: process.env.SNS_TOPIC_CALCULATOR_SUMMARY!,
+            TopicArn: topicArn,
             Subject: `Energy Usage Summary for ${customerInfo.customerName} - ${monthYear}`,
             Message: JSON.stringify({
                 location:locationInfo,
@@ -199,5 +241,5 @@ function realEqual(obj1: any, obj2: any): boolean {
     if(keys1.length !== keys2.length) return false;
     return keys1.every((key) => deepEqual(obj1[key], obj2[key]));
 }
- module.exports = { main };
+ 
  

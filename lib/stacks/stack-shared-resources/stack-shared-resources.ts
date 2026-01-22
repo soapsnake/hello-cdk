@@ -43,9 +43,4 @@ export class SharedResourcesStack extends cdk.Stack {
       description: 'The name of the DynamoDB table for calculated energy usage',
     });
   }
-
-
-
-
-
 }
