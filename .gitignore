@@ -3,9 +3,14 @@
 *.d.ts
 node_modules
 
+.DS_Store
+
 # CDK asset staging directory
 .cdk.staging
 cdk.out
 
 # Local env file (contains secrets) - do NOT commit
 .env
+
+# Root-level CSV test files
+/*.csv
